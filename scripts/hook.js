@@ -6,14 +6,51 @@ var base = module.base;
 // console.log("模块地址:",module.base);
 // console.log("大小:",module.size);
 
+// 保存原始内存数据的对象
+var originalMemory = {};
 
 Object.keys(address).forEach(key => {
-    key != "Version" ? address[key] = base.add(address[key]) : false
+    if (key != "Version") {
+        address[key] = base.add(address[key]);
+        // 如果是需要修改的内存地址，保存原始数据
+        if (key === "MenuItemDevToolsString" || key === "WechatAppHtml" || key === "SwitchVersion") {
+            try {
+                // 保存8字节的原始数据，足够大多数情况
+                originalMemory[key] = Memory.readByteArray(address[key], 8);
+            } catch (e) {
+                send("[-] 保存原始内存数据失败: " + e.message);
+            }
+        }
+    }
 });
 
 send("[+] WeChatAppEx 注入成功!");
 send("[+] 当前小程序版本: " + address.Version);
 send("[+] 等待小程序加载...");
+
+// 设置定时器，在指定时间后恢复原始内存
+var restoreTimeout = 60000; // 默认60秒后恢复，可以根据需要调整
+var restoreTimer = setTimeout(function() {
+    restoreOriginalMemory();
+    send("[+] 已自动恢复原始内存状态");
+}, restoreTimeout);
+
+// 恢复原始内存的函数
+function restoreOriginalMemory() {
+    try {
+        Object.keys(originalMemory).forEach(key => {
+            if (originalMemory[key]) {
+                Memory.protect(address[key], 8, 'rwx');
+                Memory.writeByteArray(address[key], originalMemory[key]);
+                Memory.protect(address[key], 8, 'r-x');
+            }
+        });
+        return true;
+    } catch (e) {
+        send("[-] 恢复原始内存失败: " + e.message);
+        return false;
+    }
+}
 
 function readStdString(s) {
     var flag = s.add(23).readU8()
@@ -50,6 +87,22 @@ function sendMessage(msg) {
     // send("[+] 已还原完整F12")
 }
 
+// 添加导出函数，允许从外部控制恢复
+rpc.exports = {
+    set_restore_timeout: function(ms) {
+        clearTimeout(restoreTimer);
+        restoreTimeout = ms;
+        restoreTimer = setTimeout(function() {
+            restoreOriginalMemory();
+            send("[+] 已自动恢复原始内存状态");
+        }, restoreTimeout);
+        return true;
+    },
+    restore_now: function() {
+        clearTimeout(restoreTimer);
+        return restoreOriginalMemory();
+    }
+};
 
 function replaceParams() {
     Interceptor.attach(address.LaunchAppletBegin, {
@@ -73,8 +126,6 @@ function replaceParams() {
 
 }
 
-
-
 // 过新版8555检测
 if (address.MenuItemDevToolsString) {
     var menuItemDevToolsStringCr = new Uint8Array(address.MenuItemDevToolsString.readByteArray(7));
@@ -85,7 +136,6 @@ if (address.MenuItemDevToolsString) {
     replaceParams()
     setupInterceptor()
 }
-
 
 function setupInterceptor() {
 
