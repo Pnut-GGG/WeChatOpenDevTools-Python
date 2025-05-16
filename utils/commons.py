@@ -5,7 +5,6 @@ import frida
 import sys
 import time
 import platform
-import argparse
 
 class Commons:
     def __init__(self):
@@ -15,7 +14,12 @@ class Commons:
         self.version_list = []
         self.configs_path = ""
         self.active_sessions = []
-        self.restore_timeout = 60  # 默认60秒后恢复原始内存
+        self.auto_restore_delay = 15  # 默认15秒后恢复
+
+    def set_auto_restore_delay(self, seconds):
+        """设置自动恢复延迟时间（秒）"""
+        self.auto_restore_delay = seconds
+        print(Color.GREEN + f"[+] 已设置自动恢复时间为 {seconds} 秒", Color.END)
 
     def onMessage(self, message, data):
         if message['type'] == 'send':
@@ -25,24 +29,19 @@ class Commons:
 
     def inject_wechatEx(self, pid, code):
         try:
+            # 替换自动恢复时间
+            code = code.replace("var AUTO_RESTORE_DELAY = 15000;", f"var AUTO_RESTORE_DELAY = {self.auto_restore_delay * 1000};")
+            
             session = frida.attach(pid)
             script = session.create_script(code)
             script.on("message", self.onMessage)
             script.load()
-            
-            # 设置恢复超时时间（毫秒）
-            if hasattr(self, 'restore_timeout') and self.restore_timeout > 0:
-                try:
-                    script.exports.set_restore_timeout(self.restore_timeout * 1000)
-                    print(Color.GREEN + f"[+] 已设置 {self.restore_timeout} 秒后自动恢复内存" + Color.END)
-                except Exception as e:
-                    print(Color.RED + f"[-] 设置恢复超时时间失败: {e}" + Color.END)
-            
             print(Color.GREEN + f"[+] 成功注入微信PID: {pid}", Color.END)
-            return session, script
+            print(Color.GREEN + f"[+] 将在 {self.auto_restore_delay} 秒后自动恢复内存", Color.END)
+            return session
         except Exception as e:
             print(Color.RED + f"[-] 注入微信失败PID {pid}: {e}", Color.END)
-            return None, None
+            return None
 
     def inject_wechatDLL(self, path, code):
         pid = self.device.spawn(path)
@@ -53,11 +52,6 @@ class Commons:
         self.device.resume(pid)
         time.sleep(10)
         session.detach()
-
-    def set_restore_timeout(self, seconds):
-        """设置恢复原始内存的超时时间（秒）"""
-        self.restore_timeout = seconds
-        print(Color.GREEN + f"[+] 设置恢复超时时间为 {seconds} 秒" + Color.END)
 
     def load_wechatEx_configs(self):
         path = self.wechatutils_instance.get_configs_path()
@@ -72,12 +66,12 @@ class Commons:
                     wechatEx_hookcode = open(path + "../scripts/hook.js", "r", encoding="utf-8").read()
                     wechatEx_addresses = open(path + f"../configs/address_{version}_x64.json").read()
                     wechatEx_hookcode = "var address=" + wechatEx_addresses + wechatEx_hookcode
-                    session, script = self.inject_wechatEx(pid, wechatEx_hookcode)
+                    session = self.inject_wechatEx(pid, wechatEx_hookcode)
                     if session:
-                        self.active_sessions.append((session, script))
+                        self.active_sessions.append(session)
                     print(Color.GREEN +f"[+] 成功注入{version}小程序版本，PID: {pid}", Color.END)
                 except Exception as e:
-                    print(Color.RED + f"[-] 注入{version}小程序版本失败！{e}", Color.END)
+                    print(Color.RED + f"[-] 注入{version}小程序版本失败！", Color.END)
         else:
             self.wechatutils_instance.print_process_not_found_message()
 
@@ -106,11 +100,10 @@ class Commons:
         self.load_wechatEx_configs()
 
     def manage_sessions(self):
-        for session_tuple in self.active_sessions[:]:  # 使用切片创建副本以便在迭代时修改
-            session, script = session_tuple
+        for session in self.active_sessions[:]:  # 使用切片创建副本以便在迭代时修改
             if session.is_detached:
                 print(f"Session {session} detached, removing from active sessions.")
-                self.active_sessions.remove(session_tuple)
+                self.active_sessions.remove(session)
 
 def get_cpu_architecture():
     try:

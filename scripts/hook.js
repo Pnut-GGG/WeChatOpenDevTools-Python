@@ -6,51 +6,19 @@ var base = module.base;
 // console.log("模块地址:",module.base);
 // console.log("大小:",module.size);
 
-// 保存原始内存数据的对象
+// 保存原始内存内容的对象
 var originalMemory = {};
+// 设置自动恢复时间（毫秒）
+var AUTO_RESTORE_DELAY = 15000;
 
 Object.keys(address).forEach(key => {
-    if (key != "Version") {
-        address[key] = base.add(address[key]);
-        // 如果是需要修改的内存地址，保存原始数据
-        if (key === "MenuItemDevToolsString" || key === "WechatAppHtml" || key === "SwitchVersion") {
-            try {
-                // 保存8字节的原始数据，足够大多数情况
-                originalMemory[key] = Memory.readByteArray(address[key], 8);
-            } catch (e) {
-                send("[-] 保存原始内存数据失败: " + e.message);
-            }
-        }
-    }
+    key != "Version" ? address[key] = base.add(address[key]) : false
 });
 
 send("[+] WeChatAppEx 注入成功!");
 send("[+] 当前小程序版本: " + address.Version);
 send("[+] 等待小程序加载...");
-
-// 设置定时器，在指定时间后恢复原始内存
-var restoreTimeout = 60000; // 默认60秒后恢复，可以根据需要调整
-var restoreTimer = setTimeout(function() {
-    restoreOriginalMemory();
-    send("[+] 已自动恢复原始内存状态");
-}, restoreTimeout);
-
-// 恢复原始内存的函数
-function restoreOriginalMemory() {
-    try {
-        Object.keys(originalMemory).forEach(key => {
-            if (originalMemory[key]) {
-                Memory.protect(address[key], 8, 'rwx');
-                Memory.writeByteArray(address[key], originalMemory[key]);
-                Memory.protect(address[key], 8, 'r-x');
-            }
-        });
-        return true;
-    } catch (e) {
-        send("[-] 恢复原始内存失败: " + e.message);
-        return false;
-    }
-}
+send("[+] 注意: 将在 " + (AUTO_RESTORE_DELAY / 1000) + " 秒后自动恢复内存!");
 
 function readStdString(s) {
     var flag = s.add(23).readU8()
@@ -87,22 +55,52 @@ function sendMessage(msg) {
     // send("[+] 已还原完整F12")
 }
 
-// 添加导出函数，允许从外部控制恢复
-rpc.exports = {
-    set_restore_timeout: function(ms) {
-        clearTimeout(restoreTimer);
-        restoreTimeout = ms;
-        restoreTimer = setTimeout(function() {
-            restoreOriginalMemory();
-            send("[+] 已自动恢复原始内存状态");
-        }, restoreTimeout);
-        return true;
-    },
-    restore_now: function() {
-        clearTimeout(restoreTimer);
-        return restoreOriginalMemory();
+// 保存内存区域内容
+function backupMemory(address, size, key) {
+    try {
+        originalMemory[key] = new Uint8Array(Memory.readByteArray(address, size));
+        send("[+] 已备份内存区域: " + key);
+    } catch (e) {
+        send("[-] 备份内存失败: " + e.message);
     }
-};
+}
+
+// 恢复内存区域内容
+function restoreMemory(address, key) {
+    try {
+        if (originalMemory[key]) {
+            Memory.protect(address, originalMemory[key].length, 'rw-');
+            Memory.writeByteArray(address, originalMemory[key]);
+            send("[+] 已恢复内存区域: " + key);
+            return true;
+        }
+    } catch (e) {
+        send("[-] 恢复内存失败: " + e.message);
+    }
+    return false;
+}
+
+// 恢复所有修改的内存
+function restoreAllMemory() {
+    send("[+] 开始恢复所有修改的内存...");
+    var restored = 0;
+    
+    for (var key in originalMemory) {
+        if (key.startsWith("MenuItemDevTools")) {
+            var addr = address.MenuItemDevToolsString;
+            if (key.includes("PtrData")) {
+                var menuItemDevToolsStringCr = new Uint8Array(address.MenuItemDevToolsString.readByteArray(7));
+                var intptr_ = (menuItemDevToolsStringCr[3] & 0xFF) | ((menuItemDevToolsStringCr[4] & 0xFF) << 8) | ((menuItemDevToolsStringCr[5] & 0xFF) << 16) | ((menuItemDevToolsStringCr[6] & 0xFF) << 24);
+                addr = address.MenuItemDevToolsString.add(intptr_ + 7);
+            }
+            if (restoreMemory(addr, key)) {
+                restored++;
+            }
+        }
+    }
+    
+    send("[+] 内存恢复完成，共恢复 " + restored + " 个区域");
+}
 
 function replaceParams() {
     Interceptor.attach(address.LaunchAppletBegin, {
@@ -116,6 +114,11 @@ function replaceParams() {
                     // .replaceAll('"frameset":false', '"frameset": true')
                     //"frameset":false
                     if (s !== s1) {
+                        // 备份原始数据
+                        var backupKey = "LaunchAppletParams_" + i;
+                        if (!originalMemory[backupKey]) {
+                            originalMemory[backupKey] = s;
+                        }
                         writeStdString(args[2].add(i), s1)
                     }
                 } catch (a) {
@@ -123,42 +126,55 @@ function replaceParams() {
             }
         }
     })
-
 }
 
 // 过新版8555检测
 if (address.MenuItemDevToolsString) {
+    // 备份原始数据
+    backupMemory(address.MenuItemDevToolsString, 7, "MenuItemDevTools");
+    
     var menuItemDevToolsStringCr = new Uint8Array(address.MenuItemDevToolsString.readByteArray(7));
     var intptr_ = (menuItemDevToolsStringCr[3] & 0xFF) | ((menuItemDevToolsStringCr[4] & 0xFF) << 8) | ((menuItemDevToolsStringCr[5] & 0xFF) << 16) | ((menuItemDevToolsStringCr[6] & 0xFF) << 24);
     var menuItemDevToolsStringPtrData = address.MenuItemDevToolsString.add(intptr_ + 7);
+    
+    // 备份指针数据
+    backupMemory(menuItemDevToolsStringPtrData, 8, "MenuItemDevToolsPtrData");
+    
     Memory.protect(menuItemDevToolsStringPtrData, 8, 'rw-')
     menuItemDevToolsStringPtrData.writeUtf8String("DevTools");
     replaceParams()
     setupInterceptor()
 }
 
-function setupInterceptor() {
+// 设置定时器，在指定时间后恢复内存
+setTimeout(function() {
+    restoreAllMemory();
+    send("[+] 自动恢复内存完成，已恢复到原始状态");
+}, AUTO_RESTORE_DELAY);
 
+function setupInterceptor() {
     /**
      * 
      */
-
     switch (address.Version) {
-
         case 8555:
             Interceptor.attach(address.WechatAppHtml, {
                 onEnter(args) {
+                    // 备份原始寄存器值
+                    this.originalRdx = this.context.rdx;
+                    // 修改寄存器
                     this.context.rdx = address.WechatWebHtml;
                     sendMessage()
                 }
             });
-
             break;
-
 
         case 9105:
             Interceptor.attach(address.SwitchVersion, {
                 onEnter(args) {
+                    // 备份原始寄存器值
+                    this.originalR8 = this.context.r8;
+                    // 修改寄存器
                     this.context.r8 = this.context.rax
                     sendMessage()
                 }
@@ -168,6 +184,7 @@ function setupInterceptor() {
         case 9079:
             Interceptor.attach(address.SwitchVersion, {
                 onEnter(args) {
+                    this.originalR8 = this.context.r8;
                     this.context.r8 = this.context.rax
                     sendMessage()
                 }
@@ -177,6 +194,7 @@ function setupInterceptor() {
         case 9115:
             Interceptor.attach(address.SwitchVersion, {
                 onEnter(args) {
+                    this.originalR8 = this.context.r8;
                     this.context.r8 = this.context.rax
                     sendMessage()
                 }
@@ -186,6 +204,7 @@ function setupInterceptor() {
         case 9129:
             Interceptor.attach(address.SwitchVersion, {
                 onEnter(args) {
+                    this.originalR8 = this.context.r8;
                     this.context.r8 = this.context.rax
                     sendMessage()
                 }
@@ -194,6 +213,7 @@ function setupInterceptor() {
         case 11159:
             Interceptor.attach(address.SwitchVersion, {
                 onEnter(args) {
+                    this.originalR8 = this.context.r8;
                     this.context.r8 = this.context.rax
                     sendMessage()
                 }
@@ -203,6 +223,7 @@ function setupInterceptor() {
         case 13080811:
             Interceptor.attach(address.WechatAppHtml, {
                 onEnter(args) {
+                    this.originalRsi = this.context.rsi;
                     this.context.rsi = address.WechatWebHtml
                     sendMessage()
                 }
@@ -212,6 +233,7 @@ function setupInterceptor() {
         case 13080812:
             Interceptor.attach(address.WechatAppHtml, {
                 onEnter(args) {
+                    this.originalRsi = this.context.rsi;
                     this.context.rsi = address.WechatWebHtml
                     sendMessage()
                 }
@@ -221,6 +243,7 @@ function setupInterceptor() {
         case 9193:
             Interceptor.attach(address.SwitchVersion, {
                 onEnter(args) {
+                    this.originalR8 = this.context.r8;
                     this.context.r8 = this.context.rax
                     sendMessage()
                 }
@@ -229,6 +252,7 @@ function setupInterceptor() {
         case 11205:
             Interceptor.attach(address.SwitchVersion, {
                 onEnter(args) {
+                    this.originalR8 = this.context.r8;
                     this.context.r8 = this.context.rax
                     sendMessage()
                 }
@@ -237,6 +261,7 @@ function setupInterceptor() {
         case 11275:
             Interceptor.attach(address.SwitchVersion, {
                 onEnter(args) {
+                    this.originalR8 = this.context.r8;
                     this.context.r8 = this.context.rax
                     sendMessage()
                 }
@@ -245,6 +270,7 @@ function setupInterceptor() {
         case 11253:
             Interceptor.attach(address.SwitchVersion, {
                 onEnter(args) {
+                    this.originalR8 = this.context.r8;
                     this.context.r8 = this.context.rax
                     sendMessage()
                 }
@@ -254,44 +280,11 @@ function setupInterceptor() {
             console.log(address.Version);
             Interceptor.attach(address.WechatAppHtml, {
                 onEnter(args) {
+                    this.originalRdx = this.context.rdx;
                     this.context.rdx = address.WechatWebHtml;
                     sendMessage()
                 }
             });
             break;
-
-
-        // case "null":
-        //     Interceptor.attach(address.WechatAppHtml, {
-        //         onEnter(args) {
-        //                 const webhtml= "68 74 74 70 73 3A 2F 2F 61 70 70 6C 65 74 2D 64 65 62 75 67 2E 63 6F 6D 2F 64 65 76 74 6F 6F 6C 73 2F 77 65 63 68 61 74 5F 77 65 62 2E 68 74 6D 6C";
-        //                 var  data;
-        //                 Process.enumerateModules({
-        //                     onMatch: function(module){
-        //                         var ranges = module.enumerateRanges('r--');
-        //                         for (var i = 0; i < ranges.length; i++) {
-        //                             var range = ranges[i];
-        //                             var scanResults = Memory.scanSync(range.base, range.size, webhtml);
-        //                             if (scanResults.length > 0){
-        //                                 data = scanResults[0].address
-        //                                 // console.log('Memory.scanSync() result for range ' + range.base + '-' + range.size + ':\n' + JSON.stringify(scanResults));
-        //                                 }
-        //                             }
-
-        //                     },
-        //                     onComplete: function(){
-
-        //                     }});
-
-        //                 this.context.rdx = data
-        //                 sendMessage()
-
-        //     }
-        //     })
-
-        //     break;
-
-
-
     }
 }
