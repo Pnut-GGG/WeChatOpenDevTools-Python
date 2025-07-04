@@ -58,7 +58,7 @@ function sendMessage(msg) {
 // 保存内存区域内容
 function backupMemory(address, size, key) {
     try {
-        originalMemory[key] = new Uint8Array(Memory.readByteArray(address, size));
+        originalMemory[key] = new Uint8Array(address.readByteArray(size));
         send("[+] 已备份内存区域: " + key);
     } catch (e) {
         send("[-] 备份内存失败: " + e.message);
@@ -70,7 +70,7 @@ function restoreMemory(address, key) {
     try {
         if (originalMemory[key]) {
             Memory.protect(address, originalMemory[key].length, 'rw-');
-            Memory.writeByteArray(address, originalMemory[key]);
+            address.writeByteArray(originalMemory[key]);
             send("[+] 已恢复内存区域: " + key);
             return true;
         }
